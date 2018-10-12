@@ -1,10 +1,10 @@
-# loco
+# flybot/loco
 
-![CircleCI build status](https://circleci.com/gh/aengelberg/loco.png?circle-token=056c1eb8765d2e4e2cdfa0a0c143eee009ef172f)
+This fork is updated to Choco 4 and Clojure 1.9. The upstream project has not been updated since 2016.
 
 Loco is a *Constraint Programming* library for Clojure.  Loco provides a fully *declarative, functional interface* to the Java library Choco.
 
-    [loco "0.3.1"]
+    [flybot/loco "0.4.1"]
 
 Loco requires JDK 8.
 
@@ -91,7 +91,7 @@ If a name starts with an underscore character, it will be omitted from the final
               ($= ($+ :x :_y) 2)])
 {:x 1}
 ```
-    
+
 ### Variables
 
 Every variable must be declared at least once in the model, for example,
