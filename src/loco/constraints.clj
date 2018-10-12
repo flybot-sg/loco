@@ -1,60 +1,55 @@
 (ns loco.constraints
-  (:require [loco.core :as core :refer [->choco
-                                        ->choco*
-                                        *solver*]]
-            loco.automata)
-  (:import (org.chocosolver.solver.constraints Arithmetic
-                                               ICF
-                                               LCF
-                                               Constraint)
-           (org.chocosolver.solver.variables IntVar
-                                             BoolVar
-                                             VF)
-           org.chocosolver.solver.constraints.nary.automata.FA.FiniteAutomaton))
+  (:require
+   [loco.core :as core :refer [->choco
+                               ->choco*]])
+  (:import
+   [org.chocosolver.solver Model]
+   [org.chocosolver.solver.variables IntVar BoolVar]
+   [org.chocosolver.solver.constraints Constraint]))
 
 (defn- domain-min
   [x]
   (if (number? x)
     x
-    (.getLB x)))
+    (.getLB ^IntVar x)))
 
 (defn- domain-max
   [x]
   (if (number? x)
     x
-    (.getUB x)))
+    (.getUB ^IntVar x)))
 
 (defn- make-const-var
-  [n]
-  (VF/fixed n (:csolver *solver*)))
+  [^Model model n]
+  (.intVar model n))
 
 (defn- make-int-var
   "Quick helper function to generate an integer variable for intermediate calculations."
-  [min max]
-  (VF/enumerated (str (gensym "_int-var")) min max (:csolver *solver*)))
+  [model min max]
+  (.intVar model (str (gensym "_int-var")) min max))
 
 (defn- make-bool-var
   "Quick helper function to generate a boolean variable for intermediate calculations."
-  []
-  (VF/bool (str (gensym "_bool-var")) (:csolver *solver*)))
+  [model]
+  (.boolVar model (str (gensym "_bool-var"))))
 
 (defn- constrain!
-  [constraint]
-  (.post (:csolver *solver*) constraint))
+  [model ^Constraint constraint]
+  (.post constraint))
 
 (defn- ->int-var
   "Takes a Choco IntVar or a number, and if it is a number, coerces it to an IntVar."
-  [x]
+  [model x]
   (cond
-    (number? x) (make-const-var x)
+    (number? x) (make-const-var model x)
     (instance? IntVar x) x
     (instance? Constraint x) (throw (IllegalArgumentException. "Expected a variable or a number, but got a constraint"))
     :else (throw (IllegalArgumentException. "Expected an int variable or number"))))
 
 (defn- ->choco-int-var
   "Chains ->choco and ->int-var"
-  [x]
-  (-> x ->choco ->int-var))
+  [solver x]
+  (->> x (->choco solver) (->int-var (:model solver))))
 
 (defn- id
   []
@@ -87,38 +82,38 @@ Possible arglist examples:
     m))
 
 (defmethod ->choco* :int-domain
-  [{var-name :name domain :domain}]
-  (let [v (->choco var-name)]
+  [solver {var-name :name domain :domain}]
+  (let [model (:model solver)
+        v (->choco var-name)]
     (if (map? domain)
-      (ICF/member v (:min domain) (:max domain))
-      (ICF/member v (int-array (sort (distinct domain)))))))
+      (.intVar model v (:min domain) (:max domain))
+      (.intVar model v (int-array (sort (distinct domain)))))))
 
 (defmethod ->choco* :int-var
-  [data]
-  (let [domain-expr (:domain data)
+  [solver data]
+  (let [model (:model solver)
+        domain-expr (:domain data)
         var-name (:name data)
         real-name (:real-name data)
         v (case [(boolean (:bounded domain-expr)) (sequential? domain-expr)]
-            [false false] (VF/enumerated real-name (:min domain-expr) (:max domain-expr)
-                                         (:csolver *solver*))
-            [false true] (VF/enumerated real-name (int-array (sort domain-expr))
-                                        (:csolver *solver*))
-            [true false] (VF/bounded real-name (:min domain-expr) (:max domain-expr)
-                                     (:csolver *solver*)))]
-    (swap! (:my-vars *solver*) assoc var-name v)
+            [false false] (.intVar model real-name (:min domain-expr) (:max domain-expr))
+            [false true] (.intVar model real-name (int-array (sort domain-expr)))
+            [true false] (.intVar model  real-name (:min domain-expr) (:max domain-expr)
+                                  true))]
+    (swap! (:my-vars solver) assoc var-name v)
     nil))
 
 (defmethod ->choco* :bool-var
-  [{var-name :name real-name :real-name}]
-  (let [v (VF/bool real-name (:csolver *solver*))]
-    (swap! (:my-vars *solver*) assoc var-name v)
+  [{:keys [model] :as solver} {var-name :name real-name :real-name}]
+  (let [v (.boolVar model real-name)]
+    (swap! (:my-vars solver) assoc var-name v)
     nil))
 
 ;;;;; ARITHMETIC
 
 (defn- $+view
-  [x const]
-  (VF/offset x const))
+  [model x const]
+  (.intOffsetView model x const))
 
 (defn $+
   "Takes a combination of int-vars and numbers, and returns another number/int-var which is constrained to equal the sum."
@@ -131,24 +126,26 @@ Possible arglist examples:
      :eq-shortcut true}))
 
 (defmethod ->choco* [:+ :=]
-  [{:keys [args eq-arg] :as m}]
-  (ICF/sum (into-array IntVar (map ->choco-int-var args))
-           (->choco-int-var (:eq-arg m))))
+  [{:keys [model] :as solver} {:keys [args eq-arg] :as m}]
+  (.sum model
+        (into-array IntVar (map #(->choco-int-var solver %) args))
+        "=" ;; FIXME not sure
+        (->choco-int-var solver (:eq-arg m))))
 
 (defmethod ->choco* :+
-  [{:keys [args] :as m}]
+  [{:keys [model]} {:keys [args] :as m}]
   (let [[x y & more :as vars] (map ->choco args)]
     (cond
-      (and (empty? more) (number? y)) ($+view x y)
-      (and (empty? more) (number? x)) ($+view y x)
+      (and (empty? more) (number? y)) ($+view model x y)
+      (and (empty? more) (number? x)) ($+view model y x)
       :else (let [vars (map ->int-var vars) ; converting numbers to int-views
                   mins (map #(.getLB ^IntVar %) vars)
                   maxes (map #(.getUB ^IntVar %) vars)
-                  sum-var (make-int-var (apply + mins) (apply + maxes))
+                  sum-var (make-int-var model (apply + mins) (apply + maxes))
                   vars (try (into-array BoolVar vars)
                             (catch Exception e
                               (into-array IntVar vars)))]
-              (constrain! (ICF/sum (into-array IntVar vars) sum-var))
+              (constrain! model (.sum model (into-array IntVar vars) sum-var))
               sum-var))))
 
 (defn $-
@@ -164,11 +161,11 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    (apply $+ x (map $- more))))
 
 (defmethod ->choco* :neg
-  [{x :arg}]
-  (let [x (->choco x)]
+  [{:keys [model] :as solver} {x :arg}]
+  (let [x (->choco solver x)]
     (if (number? x)
       (- x)
-      (VF/minus x))))
+      (.intMinusView model x))))
 
 (declare $=)
 
@@ -182,8 +179,8 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    :eq-shortcut true})
 
 (defn- $*view
-  [x const]
-  (VF/scale x const))
+  [model x const]
+  (.intScaleView model x const))
 
 (defn- keypoints
   [vars op neutral]
@@ -197,16 +194,16 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
         (op arg1 arg2)))))
 
 (defmethod ->choco* [:* :=]
-  [{x :arg1 y :arg2 z :eq-arg}]
-  (let [x (->choco x)
-        y (->choco y)]
+  [{:keys [model] :as solver} {x :arg1 y :arg2 z :eq-arg}]
+  (let [x (->choco solver x)
+        y (->choco solver y)]
     (cond
-      (number? y) (ICF/arithm ($*view x y) "=" (->choco-int-var z))
-      (number? x) (ICF/arithm ($*view y x) "=" (->choco-int-var z))
-      :else (ICF/times x y (->choco-int-var z)))))
+      (number? y) (.arithm model ($*view model x y) "=" (->choco-int-var solver z))
+      (number? x) (.arithm model ($*view model y x) "=" (->choco-int-var solver z))
+      :else (.times model x y (->choco-int-var solver z)))))
 
 (defmethod ->choco* :*
-  [{x :arg1 y :arg2}]
+  [{:keys [model]} {x :arg1 y :arg2}]
   (let [x (->choco x)
         y (->choco y)]
     (cond
@@ -215,8 +212,8 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
       :else (let [nums (keypoints [x y] * 1)
                   total-min (apply min nums)
                   total-max (apply max nums)
-                  z (make-int-var total-min total-max)]
-              (constrain! (ICF/times x y z))
+                  z (make-int-var model total-min total-max)]
+              (constrain! model (.times model x y z))
               z))))
 
 (defn $min
@@ -228,24 +225,25 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    :eq-shortcut true})
 
 (defmethod ->choco* [:min :=]
-  [{:keys [args eq-arg]}]
-  (let [args (map ->choco-int-var args)
-        eq-arg (->choco-int-var eq-arg)]
+  [{:keys [model] :as solver} {:keys [args eq-arg]}]
+  (let [args (map #(->choco-int-var solver %) args)
+        eq-arg (->choco-int-var solver eq-arg)]
     (if (= (count args) 2)
-      (ICF/minimum eq-arg (first args) (second args))
-      (ICF/minimum eq-arg (into-array IntVar args)))))
+      (.min model eq-arg (first args) (second args))
+      (.min model eq-arg (into-array IntVar args)))))
 
 (defmethod ->choco* :min
-  [{:keys [args]}]
-  (let [args (map ->choco-int-var args)
+  [{:keys [model] :as solver} {:keys [args]}]
+  (let [args (map #(->choco-int-var solver %) args)
         mins (map domain-min args)
         maxes (map domain-max args)
         final-min (apply min mins)
         final-max (apply min maxes)
-        new-var (make-int-var final-min final-max)]
-    (constrain! (if (= (count args) 2)
-                  (ICF/minimum new-var (first args) (second args))
-                  (ICF/minimum new-var (into-array IntVar args))))
+        new-var (make-int-var model final-min final-max)]
+    (constrain! model
+                (if (= (count args) 2)
+                  (.min model new-var (first args) (second args))
+                  (.min model new-var (into-array IntVar args))))
     new-var))
 
 (defn $max
@@ -257,24 +255,25 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    :eq-shortcut true})
 
 (defmethod ->choco* [:max :=]
-  [{:keys [args eq-arg]}]
-  (let [args (map ->choco-int-var args)
-        eq-arg (->choco-int-var eq-arg)]
+  [{:keys [model] :as solver} {:keys [args eq-arg]}]
+  (let [args (map #(->choco-int-var solver %) args)
+        eq-arg (->choco-int-var solver eq-arg)]
     (if (= (count args) 2)
-      (ICF/maximum eq-arg (first args) (second args))
-      (ICF/maximum eq-arg (into-array IntVar args)))))
+      (.max model eq-arg (first args) (second args))
+      (.max model eq-arg (into-array IntVar args)))))
 
 (defmethod ->choco* :max
-  [{:keys [args]}]
-  (let [args (map ->choco-int-var args)
+  [{:keys [model] :as solver} {:keys [args]}]
+  (let [args (map #(->choco-int-var solver %) args)
         mins (map domain-min args)
         maxes (map domain-max args)
         final-min (apply max mins)
         final-max (apply max maxes)
-        new-var (make-int-var final-min final-max)]
-    (constrain! (if (= (count args) 2)
-                  (ICF/maximum new-var (first args) (second args))
-                  (ICF/maximum new-var (into-array IntVar args))))
+        new-var (make-int-var model final-min final-max)]
+    (constrain! model
+                (if (= (count args) 2)
+                  (.max model new-var (first args) (second args))
+                  (.max model new-var (into-array IntVar args))))
     new-var))
 
 (defn $mod
@@ -287,18 +286,19 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    :eq-shortcut true})
 
 (defmethod ->choco* [:mod :=]
-  [{X :arg1 Y :arg2 Z :eq-arg}]
-  (ICF/mod (->choco-int-var X)
-           (->choco-int-var Y)
-           (->choco-int-var Z)))
+  [{:keys [model] :as solver} {X :arg1 Y :arg2 Z :eq-arg}]
+  (.mod model
+        (->choco-int-var solver X)
+        (->choco-int-var solver Y)
+        (->choco-int-var solver Z)))
 
 (defmethod ->choco* :mod
-  [{X :arg1 Y :arg2}]
-  (let [X (->choco-int-var X)
-        Y (->choco-int-var Y)
+  [{:keys [model] :as solver} {X :arg1 Y :arg2}]
+  (let [X (->choco-int-var solver X)
+        Y (->choco-int-var solver Y)
         Ymax (domain-max Y)
-        Z (make-int-var 0 (max (dec Ymax) 0))]
-    (constrain! (ICF/mod X Y Z))
+        Z (make-int-var model 0 (max (dec Ymax) 0))]
+    (constrain! model (.mod model X Y Z))
     Z))
 
 (defn $abs
@@ -310,12 +310,12 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    :eq-shortcut true})
 
 (defmethod ->choco* [:abs :=]
-  [{X :arg Y :eq-arg}]
-  (ICF/absolute (->choco-int-var Y) (->choco-int-var X)))
+  [{:keys [model] :as solver} {X :arg Y :eq-arg}]
+  (.absolute model (->choco-int-var solver Y) (->choco-int-var solver X)))
 
 (defmethod ->choco* :abs
-  [{X :arg}]
-  (VF/abs (->choco-int-var X)))
+  [{:keys [model] :as solver} {X :arg}]
+  (.intAbsView model (->choco-int-var solver X)))
 
 (defn $scalar
   "Given a list of variables X, Y, Z, etc. and a list of number coefficients a, b, c, etc. returns a new variable constrained to equal aX + bY + cZ ..."
@@ -327,15 +327,16 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
    :eq-shortcut true})
 
 (defmethod ->choco* [:scalar :=]
-  [{:keys [variables coefficients eq-arg]}]
-  (ICF/scalar (into-array IntVar (map ->choco-int-var variables))
-              (int-array coefficients)
-              "="
-              (->choco-int-var eq-arg)))
+  [{:keys [model] :as solver} {:keys [variables coefficients eq-arg]}]
+  (.scalar model
+           (into-array IntVar (map #(->choco-int-var solver %) variables))
+           (int-array coefficients)
+           "="
+           (->choco-int-var solver eq-arg)))
 
 (defmethod ->choco* :scalar
-  [{:keys [variables coefficients]}]
-  (let [variables (map ->choco-int-var variables)
+  [{:keys [model] :as solver} {:keys [variables coefficients]}]
+  (let [variables (map #(->choco-int-var solver %) variables)
         minmaxes (for [[v c] (map vector variables coefficients)
                        :let [dmin (* (domain-min v) c)
                              dmax (* (domain-max v) c)]]
@@ -344,8 +345,8 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
                      [dmax dmin]))
         final-min (apply + (map first minmaxes))
         final-max (apply + (map second minmaxes))
-        new-var (make-int-var final-min final-max)]
-    (constrain! (ICF/scalar (into-array IntVar variables) (int-array coefficients) new-var))
+        new-var (make-int-var model final-min final-max)]
+    (constrain! model (.scalar model (into-array IntVar variables) (int-array coefficients) "=" new-var))
     new-var))
 
 (declare $not $and)
@@ -368,15 +369,14 @@ to equal (x - y - z - ...) or (-x) if there's only one argument."
         :arg1 X#
         :arg2 Y#})
      ([X# Y# & more#]
-       (apply $and (map (partial apply ~fnname) (partition 2 1 (list* X# Y# more#)))))))
+      (apply $and (map (partial apply ~fnname) (partition 2 1 (list* X# Y# more#)))))))
 
 (defmethod ->choco* :arithm-eq
-  [data]
+  [{:keys [model] :as solver} data]
   (let [op (:eq data)
-        X (->choco-int-var (:arg1 data))
-        Y (->choco-int-var (:arg2 data))]
-    ;(println X Y)
-    (ICF/arithm X (name op) Y)))
+        X (->choco-int-var solver (:arg1 data))
+        Y (->choco-int-var solver (:arg2 data))]
+    (.arithm model X (name op) Y)))
 
 (defn-equality-constraint $<
   "Constrains that X < Y.
@@ -434,8 +434,8 @@ Giving more than 2 inputs results in an $and statement with multiple $>= stateme
    :id (id)})
 
 (defmethod ->choco* :true
-  [_]
-  (ICF/TRUE (:csolver *solver*)))
+  [{:keys [model]} _]
+  (.trueConstraint model))
 
 (defn $false
   "Always false."
@@ -444,8 +444,8 @@ Giving more than 2 inputs results in an $and statement with multiple $>= stateme
    :id (id)})
 
 (defmethod ->choco* :false
-  [_]
-  (ICF/FALSE (:csolver *solver*)))
+  [{:keys [model]} _]
+  (.falseConstraint model))
 
 (defn $and
   "An \"and\" statement (i.e. \"P^Q^...\"); this statement is true if and only if every subconstraint is true."
@@ -455,9 +455,9 @@ Giving more than 2 inputs results in an $and statement with multiple $>= stateme
     {:type :and, :constraints constraints}))
 
 (defmethod ->choco* :and
-  [{constraints :constraints}]
-  (let [constraints (map ->choco constraints)]
-    (LCF/and (into-array Constraint constraints))))
+  [{:keys [model] :as solver} {constraints :constraints}]
+  (let [constraints (map #(->choco solver %) constraints)]
+    (.and model (into-array Constraint constraints))))
 
 (defn $or
   "An \"or\" statement (i.e. \"PvQv...\"); this statement is true if and only if at least one subconstraint is true."
@@ -467,9 +467,9 @@ Giving more than 2 inputs results in an $and statement with multiple $>= stateme
     {:type :or, :constraints constraints}))
 
 (defmethod ->choco* :or
-  [{constraints :constraints}]
+  [{:keys [model]} {constraints :constraints}]
   (let [constraints (map ->choco constraints)]
-    (LCF/or (into-array Constraint constraints))))
+    (.or model (into-array Constraint constraints))))
 
 (defn $not
   "Given a constraint C, returns \"not C\" a.k.a. \"~C\", which is true iff C is false."
@@ -477,8 +477,11 @@ Giving more than 2 inputs results in an $and statement with multiple $>= stateme
   {:type :not, :arg C})
 
 (defmethod ->choco* :not
-  [{C :arg}]
-  (LCF/not (->choco C)))
+  [{:keys [model] :as solver} {C :arg}]
+  (let [c (->choco solver C)]
+    (.boolNotView model (if (instance? BoolVar c)
+                          c
+                          (.reify c)))))
 
 (defn $if
   "An \"if\" statement (i.e. \"implies\", \"P=>Q\"); this statement is true if and only if P is false or Q is true.
@@ -495,13 +498,16 @@ An optional \"else\" field can be specified, which must be true if P is false."
      :else else-this}))
 
 (defmethod ->choco* :if
-  [{if-this :if then-this :then else-this :else}]
+  [{:keys [model] :as solver} {if-this :if then-this :then else-this :else}]
   (if-not else-this
-    (LCF/ifThen_reifiable (->choco if-this)
-                          (->choco then-this))
-    (LCF/ifThenElse_reifiable (->choco if-this)
-                              (->choco then-this)
-                              (->choco else-this))))
+    (.ifThen model
+             (->choco solver if-this)
+             (->choco solver then-this))
+    (do
+      (.ifThenElse model
+                   (->choco solver if-this)
+                   (->choco solver then-this)
+                   (->choco solver else-this)))))
 
 (defn $cond
   "A convenience function for constructing a \"cond\"-like statement out of $if statements.
@@ -529,10 +535,10 @@ If no \"else\" clause is specified, it is \"True\" by default."
    :id (id)})
 
 (defmethod ->choco* :reify
-  [{C :arg}]
-  (let [C (->choco C)
-        V (make-bool-var)]
-    (LCF/reification V C)
+  [{:keys [model] :as solver} {C :arg}]
+  (let [C (->choco solver C)
+        V (make-bool-var model)]
+    (.reification model V C)
     V))
 
 ;;;;; GLOBAL
@@ -544,14 +550,9 @@ If no \"else\" clause is specified, it is \"True\" by default."
    :args vars})
 
 (defmethod ->choco* :distinct
-  [{vars :args}]
-  (let [vars (map ->choco vars)]
-    (ICF/alldifferent (into-array IntVar vars) "DEFAULT")))
-
-(defn $all-different?
-  "Deprecated: use $distinct"
-  [& vars]
-  ($distinct vars))
+  [{:keys [model] :as solver} {vars :args}]
+  (let [vars (map #(->choco solver %) vars)]
+    (.allDifferent model (into-array IntVar vars) "DEFAULT")))
 
 (defn $circuit
   "Given a list of int-vars L, and an optional offset number (default 0), the elements of L define a circuit, where
@@ -564,13 +565,9 @@ Hint: make the offset 1 when using a 1-based list."
      :vars list-of-vars
      :offset offset}))
 (defmethod ->choco* :circuit
-  [{list-of-vars :vars offset :offset}]
-  (let [list-of-vars (map ->choco-int-var list-of-vars)]
-    (ICF/circuit (into-array IntVar list-of-vars) offset)))
-
-(def $circuit?
-  "Deprecated: use $circuit"
-  $circuit)
+  [{:keys [model] :as solver} {list-of-vars :vars offset :offset}]
+  (let [list-of-vars (map #(->choco-int-var solver %) list-of-vars)]
+    (.circuit model (into-array IntVar list-of-vars) offset)))
 
 (defn $nth
   "Given a list of int-vars L, an int-var i, and an optional offset number (default 0), returns a new int-var constrained to equal L[i], or L[i - offset]."
@@ -585,41 +582,21 @@ Hint: make the offset 1 when using a 1-based list."
      :eq-shortcut true}))
 
 (defmethod ->choco* [:nth :=]
-  [{:keys [vars index offset eq-arg]}]
-  (let [vars (map ->choco-int-var vars)
-        index (->choco-int-var index)
-        value (->choco-int-var eq-arg)]
-    (ICF/element value (into-array IntVar vars) index offset)))
+  [{:keys [model] :as solver} {:keys [vars index offset eq-arg]}]
+  (let [vars (map #(->choco-int-var solver %) vars)
+        index (->choco-int-var solver index)
+        value (->choco-int-var solver eq-arg)]
+    (.element model value (into-array IntVar vars) index offset)))
 
 (defmethod ->choco* :nth
-  [{:keys [vars index offset]}]
-  (let [vars (map ->choco-int-var vars)
-        index (->choco-int-var index)
+  [{:keys [model] :as solver} {:keys [vars index offset]}]
+  (let [vars (map #(->choco-int-var solver %) vars)
+        index (->choco-int-var solver index)
         final-min (apply min (map domain-min vars))
         final-max (apply max (map domain-max vars))
-        new-var (make-int-var final-min final-max)]
-    (constrain! (ICF/element new-var (into-array IntVar vars) index offset))
+        new-var (make-int-var model final-min final-max)]
+    (constrain! model (.element model new-var (into-array IntVar vars) index offset))
     new-var))
-
-(defn $regular
-  "Takes a Choco automaton object constructed by the loco.automata
-  namespace, and constrains that a list of variables represents an
-  input string accepted by the automaton."
-  [^FiniteAutomaton automaton list-of-vars]
-  {:type :regular
-   :list-of-vars list-of-vars
-   :automaton automaton})
-(defmethod ->choco* :regular
-  [{:keys [list-of-vars automaton]}]
-  (let [list-of-vars (map ->choco-int-var list-of-vars)]
-    (ICF/regular (into-array IntVar list-of-vars) automaton)))
-
-(defn $regex
-  "Deprecated: use $regular
-  Given a regex and a list of variables, constrains that said variables in sequence must satisfy the regex."
-  [regex list-of-vars]
-  ($regular (loco.automata/string->automaton regex)
-            list-of-vars))
 
 (defn $cardinality
   "Takes a list of variables, and a frequency map (from numbers to frequencies), constrains
@@ -636,11 +613,11 @@ Example: ($cardinality [:a :b :c :d :e] {1 :ones, 2 :twos} :closed true)
    :occurrences (vals frequencies)
    :closed (:closed args)})
 (defmethod ->choco* :cardinality
-  [{variables :variables values :values occurrences :occurrences closed :closed}]
+  [{:keys [model] :as solver} {variables :variables values :values occurrences :occurrences closed :closed}]
   (let [values (int-array values)
-        occurrences (into-array IntVar (map ->choco-int-var occurrences))
-        variables (into-array IntVar (map ->choco-int-var variables))]
-    (ICF/global_cardinality variables values occurrences (boolean closed))))
+        occurrences (into-array IntVar (map #(->choco-int-var solver %) occurrences))
+        variables (into-array IntVar (map #(->choco-int-var solver %) variables))]
+    (.globalCardinality model variables values occurrences (boolean closed))))
 
 (defn $knapsack
   "Takes constant weights / values for a list of pre-defined items, and
@@ -664,12 +641,13 @@ Example: ($knapsack [3 1 2]    ; weights
    :total-weight total-weight
    :total-value total-value})
 (defmethod ->choco* :knapsack
-  [{:keys [weights values occurrences total-weight total-value]}]
-  (let [occurrences (map ->choco-int-var occurrences)
-        total-weight (->choco-int-var total-weight)
-        total-value (->choco-int-var total-value)]
-    (ICF/knapsack (into-array IntVar occurrences)
-                  ^IntVar total-weight
-                  ^IntVar total-value
-                  (int-array weights)
-                  (int-array values))))
+  [{:keys [model] :as solver} {:keys [weights values occurrences total-weight total-value]}]
+  (let [occurrences (map #(->choco-int-var solver %) occurrences)
+        total-weight (->choco-int-var solver total-weight)
+        total-value (->choco-int-var solver total-value)]
+    (.knapsack model
+               (into-array IntVar occurrences)
+               ^IntVar total-weight
+               ^IntVar total-value
+               (int-array weights)
+               (int-array values))))
